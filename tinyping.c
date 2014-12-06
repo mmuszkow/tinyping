@@ -1,3 +1,9 @@
+/* Author: Maciek Muszkowski 
+ * 
+ * This is a simple ping implementation for Linux.
+ * It will work ONLY on kernels 3.x+ and you need
+ * to add allowed groups to /proc/sys/net/ipv4/ping_group_range */
+
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
@@ -50,6 +56,7 @@ unsigned short ping_checksum(void *b, int len) {
 /// @return value < 0 on error, response time in ms on success
 extern long long ping(const char* adress, int timeout_s) {
     int i, sd;
+    short pid, sent_seq;
     struct icmp_echo_req pckt;
     char inbuf[192];
     struct sockaddr_in r_addr;
@@ -58,15 +65,17 @@ extern long long ping(const char* adress, int timeout_s) {
     struct timeval timeout, start, end;
     struct iphdr* iph;
     struct icmphdr* icmph;
+    socklen_t slen;
+    int rlen;
 
     // resolve hostname
     hname = gethostbyname(adress);
     if(!hname)
         return EPING_HOST;
 
-    // create socket (2 methods, SOCK_DGRAM may not need root privileges)
-    if(//((sd = socket(PF_INET, SOCK_DGRAM, IPPROTO_ICMP)) < 0) && 
-       ((sd = socket(PF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0))
+    // create socket
+    if(((sd = socket(PF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0) &&
+       ((sd = socket(PF_INET, SOCK_DGRAM, IPPROTO_ICMP)) < 0))
         return EPING_SOCK;
 
     // set TTL
@@ -91,13 +100,14 @@ extern long long ping(const char* adress, int timeout_s) {
     addr = &addr_ping;
 
     // prepare echo request packet
+    pid = getpid() & 0xFFFF;
     memset(&pckt, 0, sizeof(pckt));
     pckt.hdr.type = ICMP_ECHO;
-    pckt.hdr.un.echo.id = getpid();
+    pckt.hdr.un.echo.id = pid;
     for ( i = 0; i < sizeof(pckt.data)-1; i++ )
         pckt.data[i] = i+'0';
     pckt.data[i] = 0;
-    pckt.hdr.un.echo.sequence = seq++;
+    pckt.hdr.un.echo.sequence = (sent_seq = seq++);
     pckt.hdr.checksum = ping_checksum(&pckt, sizeof(pckt));
 
     // send echo request
@@ -108,14 +118,21 @@ extern long long ping(const char* adress, int timeout_s) {
     }
 
     // receive response (if any)
-    socklen_t len = sizeof(r_addr);
-    if(recvfrom(sd, &inbuf, sizeof(pckt), 0, (struct sockaddr*)&r_addr, &len) > 0) {
+    slen = sizeof(r_addr);
+    while((rlen = recvfrom(sd, &inbuf, sizeof(pckt), 0, (struct sockaddr*)&r_addr, &slen)) > 0) {
         gettimeofday(&end, NULL);
-        close(sd);
+        
+        // skip malformed
+        if(rlen != ECHO_REQ_PACKET_SIZE) continue;
         
         // parse response
         iph = (struct iphdr*)inbuf;
         icmph = (struct icmphdr*)(inbuf + (iph->ihl << 2));
+
+        // skip the ones we didn't send
+        if(icmph->un.echo.id != pid || icmph->un.echo.sequence != sent_seq) continue;
+
+        close(sd);
         switch(icmph->type) {
             case ICMP_ECHOREPLY: return 1000000 * (end.tv_sec - start.tv_sec) +
                                                   (end.tv_usec - start.tv_usec);
