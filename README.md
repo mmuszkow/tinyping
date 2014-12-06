@@ -1,7 +1,7 @@
 tinyping
 ========
 
-Simple ICMP ping implementation for Linux with kernel 3.x+. To use it, you'll need to allow your groups in `/proc/sys/net/ipv4/ping_group_range`. I used in in Ruby to perform ping:
+Simple ICMP ping implementation for Linux with kernel 3.x+. To use it, you'll need to allow your groups in `/proc/sys/net/ipv4/ping_group_range`. I wrote it to perform the ICMP ping in JRuby:
 ```
 module FFIping
   extend FFI::Library
