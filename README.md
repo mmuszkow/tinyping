@@ -2,6 +2,7 @@ tinyping
 ========
 
 Simple ICMP ping implementation for Linux with kernel 3.x+. To use it, you'll need to set your allowed groups in `/proc/sys/net/ipv4/ping_group_range`. I used it in my logstash ping plugin to perform ping:
+
 ```
 require "ffi"
 
