@@ -2,7 +2,7 @@
  * 
  * This is a simple ping implementation for Linux.
  * It will work ONLY on kernels 3.x+ and you need
- * to add allowed groups to /proc/sys/net/ipv4/ping_group_range */
+ * to set allowed groups in /proc/sys/net/ipv4/ping_group_range */
 
 #include <stdio.h>
 #include <string.h>
@@ -11,27 +11,27 @@
 #include <resolv.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
 #include <sys/time.h>
 #include <unistd.h>
 
-#define ECHO_REQ_PACKET_SIZE  64
-/// ICMP echo request packet
-struct icmp_echo_req {
-    struct icmphdr hdr;
-    char data[ECHO_REQ_PACKET_SIZE-sizeof(struct icmphdr)];
+#define ECHO_PACKET_SIZE  64
+
+/// ICMP echo request packet, response packet is the same when using SOCK_DGRAM
+struct icmp_echo {
+    struct icmphdr icmp;
+    char data[ECHO_PACKET_SIZE-sizeof(struct icmphdr)];
 };
 
 // number incremented with every echo request packet send
 static short seq = 1;
-// packet Time-To-Live - max possible
-static const int TTL = 255;
+// socket
+static int sd = -1;
 
 /// 1s complementary checksum
 unsigned short ping_checksum(void *b, int len) {
     unsigned short *buf = b;
-    unsigned int sum=0;
+    unsigned int sum = 0;
     unsigned short result;
 
     for ( sum = 0; len > 1; len -= 2 )
@@ -44,43 +44,35 @@ unsigned short ping_checksum(void *b, int len) {
     return result;
 }
 
-#define EPING_HOST  -1LL // Unresolvable hostname
-#define EPING_SOCK  -2LL // Socket creation failed
-#define EPING_TTL   -3LL // Setting TTL failed
-#define EPING_SETTO -4LL // Setting timeout failed
-#define EPING_SEND  -5LL // Sending echo request failed
-#define EPING_DST   -6LL // Destination unreachable
-#define EPING_TIME  -7LL // Timeout
-#define EPING_UNK   -8LL // Unknown error
+#define EPING_SOCK  -1 // Socket creation failed
+#define EPING_TTL   -2 // Setting TTL failed
+#define EPING_SETTO -3 // Setting timeout failed
+#define EPING_HOST  -4 // Unresolvable hostname
+#define EPING_SEND  -5 // Sending echo request failed
+#define EPING_DST   -6 // Destination unreachable
+#define EPING_TIME  -7 // Timeout
+#define EPING_UNK   -8 // Unknown error
 
-/// @return value < 0 on error, response time in ms on success
-extern long long ping(const char* adress, int timeout_s) {
-    int i, sd;
-    short pid, sent_seq;
-    struct icmp_echo_req pckt;
-    char inbuf[192];
-    struct sockaddr_in r_addr;
-    struct hostent* hname;
-    struct sockaddr_in addr_ping, *addr;
-    struct timeval timeout, start, end;
-    struct iphdr* iph;
-    struct icmphdr* icmph;
-    socklen_t slen;
-    int rlen;
+extern void deinit() {
+    if(sd >= 0) {
+        close(sd);
+        sd = -1;
+    }
+}
 
-    // resolve hostname
-    hname = gethostbyname(adress);
-    if(!hname)
-        return EPING_HOST;
+extern int init(int ttl, int timeout_s) {
+    struct timeval timeout;
+
+    deinit();
 
     // create socket
-    if(((sd = socket(PF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0) &&
+    if(//((sd = socket(PF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0) &&
        ((sd = socket(PF_INET, SOCK_DGRAM, IPPROTO_ICMP)) < 0))
         return EPING_SOCK;
 
     // set TTL
-    if (setsockopt(sd, SOL_IP, IP_TTL, &TTL, sizeof(TTL)) != 0) {
-        close(sd);
+    if (setsockopt(sd, SOL_IP, IP_TTL, &ttl, sizeof(ttl)) != 0) {
+        deinit();
         return EPING_TTL;
     }
 
@@ -88,10 +80,33 @@ extern long long ping(const char* adress, int timeout_s) {
     timeout.tv_sec = timeout_s;
     timeout.tv_usec = 0;
     if(setsockopt(sd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout)) != 0) {
-        close(sd);
+        deinit();
         return EPING_SETTO;
     }
-    
+ 
+    return 0;
+}
+
+/// @return value < 0 on error, response time in ms on success
+extern long long ping(const char* hostname) {
+    int i;
+    short sent_seq;
+    struct icmp_echo req, resp;
+    struct sockaddr_in r_addr;
+    struct hostent* hname;
+    struct sockaddr_in addr_ping, *addr;
+    struct timeval start, end;
+    socklen_t slen;
+    int rlen;
+
+    if(sd < 0) return EPING_SOCK;
+
+    // resolve hostname
+    hname = gethostbyname(hostname);
+    if(!hname)
+        return EPING_HOST;
+
+   
     // set IP address to ping
     memset(&addr_ping, 0, sizeof(addr_ping));
     addr_ping.sin_family = hname->h_addrtype;
@@ -100,40 +115,32 @@ extern long long ping(const char* adress, int timeout_s) {
     addr = &addr_ping;
 
     // prepare echo request packet
-    pid = getpid() & 0xFFFF;
-    memset(&pckt, 0, sizeof(pckt));
-    pckt.hdr.type = ICMP_ECHO;
-    pckt.hdr.un.echo.id = pid;
-    for ( i = 0; i < sizeof(pckt.data)-1; i++ )
-        pckt.data[i] = i+'0';
-    pckt.data[i] = 0;
-    pckt.hdr.un.echo.sequence = (sent_seq = seq++);
-    pckt.hdr.checksum = ping_checksum(&pckt, sizeof(pckt));
+    memset(&req, 0, sizeof(req));
+    req.icmp.type = ICMP_ECHO;
+    req.icmp.un.echo.id = 0; // SOCK_DGRAM & 0 => id will be set by kernel
+    for ( i = 0; i < sizeof(req.data)-1; i++ )
+        req.data[i] = i+'0';
+    req.data[i] = 0;
+    req.icmp.un.echo.sequence = sent_seq = seq++;
+    req.icmp.checksum = ping_checksum(&req, sizeof(req));
 
     // send echo request
     gettimeofday(&start, NULL);
-    if(sendto(sd, &pckt, sizeof(pckt), 0, (struct sockaddr*)addr, sizeof(*addr)) <= 0) {
-        close(sd);
+    if(sendto(sd, &req, ECHO_PACKET_SIZE, 0, (struct sockaddr*)addr, sizeof(*addr)) <= 0)
         return EPING_SEND;
-    }
 
     // receive response (if any)
     slen = sizeof(r_addr);
-    while((rlen = recvfrom(sd, &inbuf, sizeof(pckt), 0, (struct sockaddr*)&r_addr, &slen)) > 0) {
+    while((rlen = recvfrom(sd, &resp, ECHO_PACKET_SIZE, 0, (struct sockaddr*)&r_addr, &slen)) > 0) {
         gettimeofday(&end, NULL);
         
         // skip malformed
-        if(rlen != ECHO_REQ_PACKET_SIZE) continue;
+        if(rlen != ECHO_PACKET_SIZE) continue;
         
-        // parse response
-        iph = (struct iphdr*)inbuf;
-        icmph = (struct icmphdr*)(inbuf + (iph->ihl << 2));
-
         // skip the ones we didn't send
-        if(icmph->un.echo.id != pid || icmph->un.echo.sequence != sent_seq) continue;
+        if(resp.icmp.un.echo.sequence != sent_seq) continue;
 
-        close(sd);
-        switch(icmph->type) {
+        switch(resp.icmp.type) {
             case ICMP_ECHOREPLY: return 1000000 * (end.tv_sec - start.tv_sec) +
                                                   (end.tv_usec - start.tv_usec);
             case ICMP_DEST_UNREACH:return EPING_DST;
@@ -143,7 +150,14 @@ extern long long ping(const char* adress, int timeout_s) {
     }
 
     // no response in specified time
-    close(sd);
     return EPING_TIME;
 }
+
+//#include <stdio.h>
+//int main() {
+//    init(255, 2);
+//    printf("%lld\n", ping("google.com"));
+//    deinit();
+//    return 0;
+//}
 
