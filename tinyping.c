@@ -24,7 +24,7 @@ struct icmp_echo {
 };
 
 // number incremented with every echo request packet send
-static short seq = 1;
+static unsigned short seq = 1;
 // socket
 static int sd = -1;
 
@@ -90,7 +90,7 @@ extern int init(int ttl, int timeout_s) {
 /// @return value < 0 on error, response time in ms on success
 extern long long ping(const char* hostname) {
     int i;
-    short sent_seq;
+    unsigned short sent_seq;
     struct icmp_echo req, resp;
     struct sockaddr_in r_addr;
     struct hostent* hname;
@@ -99,12 +99,12 @@ extern long long ping(const char* hostname) {
     socklen_t slen;
     int rlen;
 
+    // not initialized
     if(sd < 0) return EPING_SOCK;
 
     // resolve hostname
     hname = gethostbyname(hostname);
-    if(!hname)
-        return EPING_HOST;
+    if(!hname) return EPING_HOST;
 
    
     // set IP address to ping
@@ -133,10 +133,10 @@ extern long long ping(const char* hostname) {
     slen = sizeof(r_addr);
     while((rlen = recvfrom(sd, &resp, ECHO_PACKET_SIZE, 0, (struct sockaddr*)&r_addr, &slen)) > 0) {
         gettimeofday(&end, NULL);
-        
+
         // skip malformed
         if(rlen != ECHO_PACKET_SIZE) continue;
-        
+
         // skip the ones we didn't send
         if(resp.icmp.un.echo.sequence != sent_seq) continue;
 
